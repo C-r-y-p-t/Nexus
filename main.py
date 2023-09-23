@@ -3,7 +3,9 @@ from colorama import Fore, init
 from pystyle import Colors, Colorate
 import aiohttp
 import asyncio
+import requests
 
+exclude = "11"
 os.system(f"Title Nexus")
 token = None
 init(autoreset=True)
@@ -29,8 +31,8 @@ def options():
 │ [1] Token checker  │ [6] Mass Roles       │ [11] Set Token     │
 │ [2] Messager       │ [7] Channel Remover  │ [12] Set Webhook   │
 │ [3] Channel Spam   │ [8] Channel Creator  │ [13] Get channels  │
-│ [4] Mass Ban       │ [9] Webhook Remover  │ [14] Get invite    │
-│ [5] Give Admin     │ [10] Webhook Spammer │ [15] Create invite │
+│ [4] Mass Ban       │ [9] Guild Renamer    │ [14] Get invite    │
+│ [5] Give Admin     │ [10] Mass nickname   │ [15] Create invite │
 └────────────────────┴──────────────────────┴────────────────────┘
 │                                                                │
 └────────────────────────────────────────────────────────────────┘
@@ -91,7 +93,7 @@ async def get_guild_invite(token, guild_id):
     url = f"https://discord.com/api/v10/guilds/{guild_id}/invites"
     
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, headers=headers) as response:
+        async with session.get(url, headers=headers) as response:
             if response.status == 200:
                 data = await response.json()
                 return data
@@ -133,19 +135,38 @@ async def get_guild_members(token, guild_id):
             else:
                 return f"Error fetching guild members. Status code: {response.status}"
 
-async def ban_member(token, guild_id, user_id):
+
+def mass_ban(token, guild_id, exclude_users=None):
     headers = {
-        "Authorization": f"Bot {token}"
+        "Authorization": f"Bot {token}"  # Prefix the token with "Bot" for a bot token
     }
 
-    url = f"https://discord.com/api/v10/guilds/{guild_id}/bans/{user_id}"
-    
-    async with aiohttp.ClientSession() as session:
-        async with session.put(url, headers=headers) as response:
-            if response.status == 204:
-                return "Member banned successfully."
+    url = f"https://discord.com/api/v10/guilds/{guild_id}/members"
+
+    # Fetch the list of members in the guild
+    response = requests.get(url, headers=headers)
+
+    if response.status_code == 200:
+        members = response.json()
+        for member in members:
+            user_id = member.get("user", {}).get("id", "")
+            
+            # Check if the user should be excluded from the ban
+            if exclude_users and user_id in exclude_users:
+                print(f"Skipping user with ID {user_id} from the ban.")
+                continue
+
+            # Ban the user
+            ban_url = f"https://discord.com/api/v10/guilds/{guild_id}/bans/{user_id}"
+            ban_response = requests.put(ban_url, headers=headers)
+
+            if ban_response.status_code == 204:
+                print(f"User with ID {user_id} banned successfully.")
             else:
-                return f"Error banning member. Status code: {response.status}"
+                print(f"Error banning user with ID {user_id}. Status code: {ban_response.status_code}")
+    else:
+        print(f"Error fetching guild members. Status code: {response.status_code}")
+
 
 async def create_admin_role(token, guild_id):
     headers = {
@@ -199,7 +220,7 @@ async def create_mass_roles(token, guild_id, num_roles, role_name):
             }
             
             async with session.post(url, headers=headers, json=payload) as response:
-                if response.status != 201:
+                if response.status != 200:
                     print(f"Failed to create role {i + 1}. Status code: {response.status}")
 
     print(f"{num_roles} roles created with the name '{role_name}' in the guild with ID {guild_id}.")
@@ -213,7 +234,7 @@ async def delete_channel(token, channel_id):
     
     async with aiohttp.ClientSession() as session:
         async with session.delete(url, headers=headers) as response:
-            if response.status == 204:
+            if response.status == 200:
                 print(f"Channel with ID {channel_id} has been deleted.")
             else:
                 print(f"Error deleting channel with ID {channel_id}. Status code: {response.status}")
@@ -257,8 +278,74 @@ async def create_mass_channels(token, guild_id, num_channels, channel_name, chan
     channel_type_str = "text" if channel_type == 0 else "voice"
     print(f"{num_channels} {channel_type_str} channels created with the name '{channel_name}' in the guild with ID {guild_id}.")
 
+
+async def rename_guild(token, guild_id, new_name):
+    headers = {
+        "Authorization": f"Bot {token}"
+    }
+
+    url = f"https://discord.com/api/v10/guilds/{guild_id}"
+
+    payload = {
+        "name": new_name
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.patch(url, headers=headers, json=payload) as response:
+            if response.status == 200:
+                return f"Guild renamed to '{new_name}' successfully."
+            else:
+                return f"Error renaming guild. Status code: {response.status}"
+
+
+async def mass_name_changer(token, guild_id, new_nickname):
+    headers = {
+        "Authorization": f"Bot {token}"
+    }
+
+    # Fetch the list of members in the guild
+    url = f"https://discord.com/api/v10/guilds/{guild_id}/members"
+    response = requests.get(url, headers=headers)
+
+    if response.status_code == 200:
+        members = response.json()
+        for member in members:
+            member_id = member['user']['id']
+            
+            url = f"https://discord.com/api/v10/guilds/{guild_id}/members/{member_id}"
+            payload = {"nick": new_nickname}
+            response = requests.patch(url, headers=headers, json=payload)
+
+            if response.status_code == 200:
+                print(f"Changed nickname for member with ID {member_id} to '{new_nickname}'.")
+            else:
+                print(f"Error changing nickname for member with ID {member_id}. Status code: {response.status_code}")
+    else:
+        print(f"Error fetching guild members. Status code: {response.status_code}")
+
+def create_invite(token, channel_id, max_uses=0, max_age=0):
+    headers = {
+        "Authorization": f"Bot {token}"
+    }
+
+    url = f"https://discord.com/api/v10/channels/{channel_id}/invites"
+
+    payload = {
+        "max_age": max_age, 
+        "max_uses": max_uses,  
+        "unique": True  
+    }
+
+    response = requests.post(url, headers=headers, json=payload)
+
+    if response.status_code == 201:
+        invite_data = response.json()
+        return invite_data.get("url")
+    else:
+        return None
+
 async def main():
-    global token
+    global token, exlude
     tool_name = "Home"
     show_table = True
     while True:
@@ -272,7 +359,7 @@ async def main():
             break
         elif show_table and choice.isdigit():
             choice = int(choice)
-            if 1 <= choice <= 14:
+            if 1 <= choice <= 15:
                 if choice == 1:
                     tool_name = "Token Checker"
                     inp = input("Enter the bot token: ")
@@ -332,16 +419,16 @@ async def main():
                     else:
                         inp = input("Enter your Discord bot token: ")
 
-                    guild_id = input("Enter the guild ID where you want to mass ban members: ")
+                    guild_id = input("Enter the guild ID where you want to mass ban members: ")  
 
-                    members = await get_guild_members(inp, guild_id)
-                    if isinstance(members, list):
-                        for member in members:
-                            user_id = member['user']['id']
-                            await ban_member(inp, guild_id, user_id)
-                        print(f"Successfully banned {len(members)} members in the guild with ID {guild_id}.")
+                    exclude = input("do you want to exlude any user ids? (1 : yes and 0: no) ")
+                    if exclude == 1:
+                        exclude_users = input("Enter user IDs to exclude from the ban (seperate with commas. 0 for none): ").split(",")
+                        exclude_users = [user_id.strip() for user_id in exclude_users if user_id.strip()] 
                     else:
-                        print(members)
+                        exclude_users = None
+
+                    mass_ban(inp, guild_id, exclude_users)
 
                     input("Press Enter to continue...")
                     tool_name = "Home"
@@ -428,9 +515,42 @@ async def main():
                     input("Press Enter to continue...")
                     tool_name = "Home"
                 elif choice == 9:
-                    tool_name = "Webhook Remover"
+                    tool_name = "Guild Renamer"
+                    use_existing_token = input("Do you want to use the existing token? (1 for Yes, 0 for No): ").strip()
+                    if use_existing_token == "1":
+                        if token is None:
+                            token = input("Enter your token: ")
+                        else:
+                            inp = token
+                    else:
+                        inp = input("Enter your Discord bot token: ")
+
+                    guild_id = input("Enter the guild ID where you want to rename the guild: ")
+                    new_name = input("Enter the new name for the guild: ")
+
+                    response = await rename_guild(inp, guild_id, new_name)
+                    print(response)
+
+                    input("Press Enter to continue...")
+                    tool_name = "Home"
                 elif choice == 10:
-                    tool_name = "Webhook Spammer"
+                    tool_name = "Mass Name Changer"
+                    use_existing_token = input("Do you want to use the existing token? (1 for Yes, 0 for No): ").strip()
+                    if use_existing_token == "1":
+                        if token is None:
+                            token = input("Enter your token: ")
+                        else:
+                            inp = token
+                    else:
+                        inp = input("Enter your Discord bot token: ")
+
+                    guild_id = input("Enter the guild ID: ")
+                    new_nickname = input("Enter the new nickname for all members: ")
+
+                    mass_name_changer(inp, guild_id, new_nickname)
+
+                    input("Press Enter to continue...")
+                    tool_name = "Home"
                 elif choice == 11:
                     token = input("Enter your Discord bot token: ")
                     print(f"Token set to: {token}")
@@ -478,6 +598,25 @@ async def main():
                         print(invite_info.get("url"))
                     else:
                         print(invite_info)
+                    input("Press Enter to continue...")
+                    tool_name = "Home"
+                elif choice == 15:
+                    tool_name = "Create Invite"
+                    use_existing_token = input("Do you want to use the existing token? (1 for Yes, 0 for No): ").strip()
+                    if use_existing_token == "1":
+                        if token is None:
+                            print("No existing token found. Please enter a new token.")
+                        else:
+                            inp = token
+                    else:
+                        inp = input("Enter your Discord bot token: ")
+
+                    guild_id = input("Enter the guild ID: ")
+                    invite_url = create_invite(token, channel_id, max_uses=1, max_age=86400)  # Create an invite that expires in 24 hours after 1 use
+                    if invite_url:
+                        print(f"Invite URL: {invite_url}")
+                    else:
+                        print("Error creating invite.")
                     input("Press Enter to continue...")
                     tool_name = "Home"
             else:
