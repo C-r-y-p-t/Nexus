@@ -100,25 +100,41 @@ async def get_guild_invite(token, guild_id):
             else:
                 return f"Error fetching server invite. Status code: {response.status}"
 
-async def channel_spam(token, channel_id, message, num_messages, delay):
+async def channel_spam(token, channel_id, message, num_messages):
     headers = {
         "Authorization": f"Bot {token}"
     }
 
     url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
 
-    payload = {
-        "content": message
-    }
-    
-    async with aiohttp.ClientSession() as session:
-        for _ in range(num_messages):
-            async with session.post(url, headers=headers, json=payload) as response:
-                if response.status == 200:
-                    print(f"Message {_+1}/{num_messages} sent successfully.")
-                else:
-                    print(f"Error sending message {_+1}/{num_messages}. Status code: {response.status}")
-                await asyncio.sleep(delay)
+    async def send_message_task(message_num):
+        payload = {
+            "content": message
+        }
+
+        base_delay = 0.5  # Initial delay in seconds
+        max_delay = 10.0  # Maximum delay in seconds
+        current_delay = base_delay
+
+        while True:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=payload) as response:
+                    if response.status == 200:
+                        print(f"Message {message_num}/{num_messages} sent successfully.")
+                        break
+                    elif response.status == 429:
+                        print(f"Rate limited. Waiting for {current_delay} seconds.")
+                        await asyncio.sleep(current_delay)
+                        # Increase the delay exponentially, but cap it at max_delay
+                        current_delay = min(current_delay * 2, max_delay)
+                    else:
+                        print(f"Message {message_num}/{num_messages}: Error sending message. Status code: {response.status}")
+                        break
+
+    tasks = [send_message_task(i + 1) for i in range(num_messages)]
+    await asyncio.gather(*tasks)
+
+
 
 async def get_guild_members(token, guild_id):
     headers = {
@@ -136,7 +152,7 @@ async def get_guild_members(token, guild_id):
                 return f"Error fetching guild members. Status code: {response.status}"
 
 
-def mass_ban(token, guild_id, exclude_users=None):
+async def mass_ban(token, guild_id, exclude_users=None):
     headers = {
         "Authorization": f"Bot {token}"  # Prefix the token with "Bot" for a bot token
     }
@@ -148,22 +164,31 @@ def mass_ban(token, guild_id, exclude_users=None):
 
     if response.status_code == 200:
         members = response.json()
+        ban_tasks = []  # List to hold ban coroutines
+
         for member in members:
             user_id = member.get("user", {}).get("id", "")
-            
+
             # Check if the user should be excluded from the ban
             if exclude_users and user_id in exclude_users:
                 print(f"Skipping user with ID {user_id} from the ban.")
                 continue
 
-            # Ban the user
-            ban_url = f"https://discord.com/api/v10/guilds/{guild_id}/bans/{user_id}"
-            ban_response = requests.put(ban_url, headers=headers)
+            # Define a coroutine to ban the user
+            async def ban_user(user_id):
+                ban_url = f"https://discord.com/api/v10/guilds/{guild_id}/bans/{user_id}"
+                ban_response = requests.put(ban_url, headers=headers)
 
-            if ban_response.status_code == 204:
-                print(f"User with ID {user_id} banned successfully.")
-            else:
-                print(f"Error banning user with ID {user_id}. Status code: {ban_response.status_code}")
+                if ban_response.status_code == 204:
+                    print(f"User with ID {user_id} banned successfully.")
+                else:
+                    print(f"Error banning user with ID {user_id}. Status code: {ban_response.status_code}")
+
+            ban_task = asyncio.create_task(ban_user(user_id))
+            ban_tasks.append(ban_task)
+
+        # Await all ban tasks concurrently
+        await asyncio.gather(*ban_tasks)
     else:
         print(f"Error fetching guild members. Status code: {response.status_code}")
 
@@ -250,9 +275,13 @@ async def delete_all_channels(token, guild_id):
         async with session.get(url, headers=headers) as response:
             if response.status == 200:
                 channels = await response.json()
-                for channel in channels:
-                    channel_id = channel.get("id")
-                    await delete_channel(token, channel_id)
+                # Batch the channel IDs for deletion
+                channel_ids = [channel.get("id") for channel in channels]
+                batch_size = 10  # You can adjust this batch size
+                for i in range(0, len(channel_ids), batch_size):
+                    batch = channel_ids[i:i + batch_size]
+                    tasks = [delete_channel(token, channel_id) for channel_id in batch]
+                    await asyncio.gather(*tasks)
                 print(f"All channels in the guild with ID {guild_id} have been deleted.")
             else:
                 print(f"Error fetching channels. Status code: {response.status}")
@@ -263,18 +292,28 @@ async def create_mass_channels(token, guild_id, num_channels, channel_name, chan
     }
 
     url = f"https://discord.com/api/v10/guilds/{guild_id}/channels"
-    
-    async with aiohttp.ClientSession() as session:
-        for i in range(num_channels):
-            payload = {
-                "name": channel_name,
-                "type": channel_type  
-            }
-            
-            async with session.post(url, headers=headers, json=payload) as response:
-                if response.status != 201:
-                    print(f"Failed to create channel {i + 1}. Status code: {response.status}")
-    
+
+    async def create_channel(channel_num):
+        payload = {
+            "name": f"{channel_name}-{channel_num}",
+            "type": channel_type
+        }
+
+        async with aiohttp.ClientSession() as session:
+            while True:
+                async with session.post(url, headers=headers, json=payload) as response:
+                    if response.status == 201:
+                        print(f"Channel {channel_num} created successfully.")
+                        break
+                    elif response.status == 429:
+                        await asyncio.sleep(0.79)
+                    else:
+                        print(f"Failed to create channel {channel_num}. Status code: {response.status}")
+                        break
+
+    tasks = [create_channel(i + 1) for i in range(num_channels)]
+    await asyncio.gather(*tasks)
+
     channel_type_str = "text" if channel_type == 0 else "voice"
     print(f"{num_channels} {channel_type_str} channels created with the name '{channel_name}' in the guild with ID {guild_id}.")
 
@@ -305,23 +344,33 @@ async def mass_name_changer(token, guild_id, new_nickname):
 
     # Fetch the list of members in the guild
     url = f"https://discord.com/api/v10/guilds/{guild_id}/members"
-    response = requests.get(url, headers=headers)
 
-    if response.status_code == 200:
-        members = response.json()
-        for member in members:
-            member_id = member['user']['id']
-            
-            url = f"https://discord.com/api/v10/guilds/{guild_id}/members/{member_id}"
-            payload = {"nick": new_nickname}
-            response = requests.patch(url, headers=headers, json=payload)
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers) as response:
+            if response.status == 200:
+                members = await response.json()
+                change_nickname_tasks = []  # List to hold nickname change coroutines
 
-            if response.status_code == 200:
-                print(f"Changed nickname for member with ID {member_id} to '{new_nickname}'.")
+                for member in members:
+                    member_id = member['user']['id']
+                    url = f"https://discord.com/api/v10/guilds/{guild_id}/members/{member_id}/nick"
+                    payload = {"nick": new_nickname}
+
+                    # Define a coroutine to change the nickname
+                    async def change_nickname(member_id, url, headers, payload):
+                        async with session.patch(url, headers=headers, json=payload) as nick_response:
+                            if nick_response.status == 200:
+                                print(f"Changed nickname for member with ID {member_id} to '{new_nickname}'.")
+                            else:
+                                print(f"Error changing nickname for member with ID {member_id}. Status code: {nick_response.status}")
+
+                    change_task = asyncio.create_task(change_nickname(member_id, url, headers, payload))
+                    change_nickname_tasks.append(change_task)
+
+                # Await all nickname change tasks concurrently
+                await asyncio.gather(*change_nickname_tasks)
             else:
-                print(f"Error changing nickname for member with ID {member_id}. Status code: {response.status_code}")
-    else:
-        print(f"Error fetching guild members. Status code: {response.status_code}")
+                print(f"Error fetching guild members. Status code: {response.status}")
 
 def create_invite(token, channel_id, max_uses=0, max_age=0):
     headers = {
@@ -345,7 +394,7 @@ def create_invite(token, channel_id, max_uses=0, max_age=0):
         return None
 
 async def main():
-    global token, exlude
+    global token, exclude
     tool_name = "Home"
     show_table = True
     while True:
@@ -399,15 +448,16 @@ async def main():
                     num_messages = int(input("Enter the number of messages to send: "))
                     delay = float(input("Enter the delay (in seconds) between messages: "))
 
+                    tasks = []
                     for _ in range(num_messages):
-                        response = await send_message(inp, channel_id, message)
-                        print(response)
-                        await asyncio.sleep(delay)
+                        tasks.append(send_message(inp, channel_id, message))
+                    responses = await asyncio.gather(*tasks)
+                    
+                    for i, response in enumerate(responses):
+                        print(f"Message {i+1}/{num_messages}: {response}")
 
-                    print(f"Successfully sent {num_messages} messages with a {delay} second delay each.")
                     input("Press Enter to continue...")
                     tool_name = "Home"
-
                 elif choice == 4:
                     tool_name = "Mass Ban"
                     use_existing_token = input("Do you want to use the existing token? (1 for Yes, 0 for No): ").strip()
@@ -419,16 +469,16 @@ async def main():
                     else:
                         inp = input("Enter your Discord bot token: ")
 
-                    guild_id = input("Enter the guild ID where you want to mass ban members: ")  
+                    guild_id = input("Enter the guild ID where you want to mass ban members: ")
 
-                    exclude = input("do you want to exlude any user ids? (1 : yes and 0: no) ")
-                    if exclude == 1:
-                        exclude_users = input("Enter user IDs to exclude from the ban (seperate with commas. 0 for none): ").split(",")
-                        exclude_users = [user_id.strip() for user_id in exclude_users if user_id.strip()] 
+                    exclude = input("Do you want to exclude any user ids? (1 : yes and 0: no) ")
+                    if int(exclude) == 1:
+                        exclude_users = input("Enter user IDs to exclude from the ban (separate with commas. 0 for none): ").split(",")
+                        exclude_users = [user_id.strip() for user_id in exclude_users if user_id.strip()]
                     else:
                         exclude_users = None
 
-                    mass_ban(inp, guild_id, exclude_users)
+                    await mass_ban(inp, guild_id, exclude_users)
 
                     input("Press Enter to continue...")
                     tool_name = "Home"
@@ -446,12 +496,10 @@ async def main():
                     guild_id = input("Enter the guild ID: ")
                     user_id = input("Enter the user ID: ")
 
-
                     role_id = await create_admin_role(inp, guild_id)
 
                     if role_id:
-
-                        await assign_role_to_user(inp, guild_id, user_id, role_id)
+                        response = await assign_role_to_user(inp, guild_id, user_id, role_id)
                         print(f"Admin role created and assigned to user with ID {user_id} in the guild with ID {guild_id}.")
                     else:
                         print("Failed to create the admin role.")
@@ -547,7 +595,7 @@ async def main():
                     guild_id = input("Enter the guild ID: ")
                     new_nickname = input("Enter the new nickname for all members: ")
 
-                    mass_name_changer(inp, guild_id, new_nickname)
+                    await mass_name_changer(inp, guild_id, new_nickname)
 
                     input("Press Enter to continue...")
                     tool_name = "Home"
@@ -611,7 +659,7 @@ async def main():
                     else:
                         inp = input("Enter your Discord bot token: ")
 
-                    guild_id = input("Enter the guild ID: ")
+                    channel_id = input("Enter the channel ID: ")
                     invite_url = create_invite(token, channel_id, max_uses=1, max_age=86400)  # Create an invite that expires in 24 hours after 1 use
                     if invite_url:
                         print(f"Invite URL: {invite_url}")
@@ -619,8 +667,10 @@ async def main():
                         print("Error creating invite.")
                     input("Press Enter to continue...")
                     tool_name = "Home"
+                else:
+                    print(Fore.RED + "Invalid option. Please select a valid option (1-15)." + Fore.RESET)
             else:
-                print(Fore.RED + "Invalid option. Please select a valid option (1-12)." + Fore.RESET)
+                print(Fore.RED + "Invalid option. Please select a valid option (1-15)." + Fore.RESET)
         elif not show_table and choice == "back":
             show_table = True
             tool_name = "home"
